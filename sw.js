@@ -1,0 +1,64 @@
+const CACHE_NAME = 'premium-techs-cache-v5';
+const ASSETS_TO_CACHE = [
+  '/Secure-Static-App-Cloudflare/',
+  '/Secure-Static-App-Cloudflare/index.html',
+  '/Secure-Static-App-Cloudflare/css/style.css',
+  '/Secure-Static-App-Cloudflare/js/app.js',
+  '/Secure-Static-App-Cloudflare/manifest.json',
+  '/Secure-Static-App-Cloudflare/assets/logo-192.png',
+  '/Secure-Static-App-Cloudflare/assets/logo-512.png'
+];
+
+// Install Event: Cache essential static assets
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.addAll(ASSETS_TO_CACHE);
+    })
+  );
+  self.skipWaiting();
+});
+
+// Activate Event: Cleanup old caches if any
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cache) => {
+          if (cache !== CACHE_NAME) {
+            return caches.delete(cache);
+          }
+        })
+      );
+    })
+  );
+  self.clients.claim();
+});
+
+// Fetch Event: Stale-While-Revalidate Strategy
+self.addEventListener('fetch', (event) => {
+  // We only want to handle GET requests
+  if (event.request.method !== 'GET') return;
+
+  event.respondWith(
+    caches.open(CACHE_NAME).then((cache) => {
+      return cache.match(event.request).then((cachedResponse) => {
+        // Fetch fresh data in the background (Revalidate)
+        const fetchPromise = fetch(event.request).then((networkResponse) => {
+          // If the fetch was successful, update the cache
+          if (networkResponse && networkResponse.status === 200) {
+            cache.put(event.request, networkResponse.clone());
+          }
+          return networkResponse;
+        }).catch((err) => {
+          // Ignore network errors in background fetch
+          console.warn('Background fetch failed:', err);
+        });
+
+        // Return the cached response immediately if it exists (Stale),
+        // otherwise wait for the network response.
+        return cachedResponse || fetchPromise;
+      });
+    })
+  );
+});

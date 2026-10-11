@@ -1,0 +1,25 @@
+{
+  "name": "Secure App Delivery",
+  "short_name": "Secure App Delivery",
+  "id": "/Secure-Static-App-Cloudflare/",
+  "start_url": "/Secure-Static-App-Cloudflare/",
+  "scope": "/Secure-Static-App-Cloudflare/",
+  "description": "The best premium apps & games directly from Telegram",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#024773",
+  "icons": [
+    {
+      "src": "/Secure-Static-App-Cloudflare/assets/logo-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/Secure-Static-App-Cloudflare/assets/logo-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
