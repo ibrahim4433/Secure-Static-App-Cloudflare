@@ -3,7 +3,8 @@ from PIL import Image
 import glob
 
 # Path to banners
-banners_path = '/mnt/c/Documents and Settings/ibrah/My Documents/github/Premium-Tech-appstore/assets/banners/**/*.jpg'
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+banners_path = os.path.join(base_dir, 'assets/banners/**/*.jpg')
 
 # Find all banner jpgs
 images = glob.glob(banners_path, recursive=True)

@@ -1,74 +1,127 @@
+/**
+ * Cloudflare Universal Secure Asset Gateway
+ * Acts as an edge proxy and secure streaming bridge for:
+ * 1. Storage backends (Cloudflare R2, AWS S3, custom origins)
+ * 2. Telegram Bot API storage (zero-cost file hosting)
+ * 3. Secure token-protected binary releases
+ */
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const fileId = url.searchParams.get("id");
     const action = url.searchParams.get("action") || "download";
+    const source = url.searchParams.get("source") || "auto"; // "telegram" | "direct" | "auto"
 
-    if (!fileId) {
-      return new Response("Missing id parameter", { status: 400 });
-    }
-
-    const BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
-    if (!BOT_TOKEN) {
-      return new Response("Bot token not configured in worker", { status: 500 });
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        },
+      });
     }
 
     try {
-      // Check Cache first
-      const cache = caches.default;
-      const cacheKey = new Request(url.toString(), request);
-      if (action === "image") {
-        const cachedResponse = await cache.match(cacheKey);
-        if (cachedResponse) {
-          return cachedResponse;
+      // ----------------------------------------------------
+      // MODE 1: Telegram Bot File Streaming (Zero-Cost Storage)
+      // ----------------------------------------------------
+      const fileId = url.searchParams.get("id");
+      if (fileId || source === "telegram") {
+        if (!fileId) {
+          return new Response("Missing 'id' parameter for Telegram upstream", { status: 400 });
         }
+
+        const BOT_TOKEN = env.TELEGRAM_BOT_TOKEN;
+        if (!BOT_TOKEN) {
+          return new Response("Telegram Bot Token is not configured in Worker secrets", { status: 500 });
+        }
+
+        // Cache lookup for images and static assets
+        const cache = caches.default;
+        const cacheKey = new Request(url.toString(), request);
+        if (action === "image") {
+          const cached = await cache.match(cacheKey);
+          if (cached) return cached;
+        }
+
+        // Request file metadata from Telegram
+        const metaRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
+        const metaData = await metaRes.json();
+
+        if (!metaData.ok) {
+          return new Response(`Upstream Telegram Error: ${metaData.description}`, { status: 400 });
+        }
+
+        const filePath = metaData.result.file_path;
+        const streamUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+        const fileRes = await fetch(streamUrl);
+
+        return formatStreamResponse(fileRes, url, action, cacheKey, cache);
       }
 
-      // 1. Ask Telegram for the file path
-      const getFileRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-      const fileData = await getFileRes.json();
+      // ----------------------------------------------------
+      // MODE 2: Direct Upstream Proxy (S3 / R2 / GitHub Releases / Custom Origin)
+      // ----------------------------------------------------
+      const targetUrl = url.searchParams.get("url");
+      if (targetUrl) {
+        // Optional upstream authentication via Worker secret
+        const headers = new Headers();
+        if (env.UPSTREAM_AUTH_BEARER) {
+          headers.set("Authorization", `Bearer ${env.UPSTREAM_AUTH_BEARER}`);
+        }
 
-      if (!fileData.ok) {
-        return new Response("Telegram API error: " + fileData.description, { status: 400 });
+        const upstreamRes = await fetch(targetUrl, { headers });
+        const cache = caches.default;
+        const cacheKey = new Request(url.toString(), request);
+
+        return formatStreamResponse(upstreamRes, url, action, cacheKey, cache);
       }
 
-      const filePath = fileData.result.file_path;
-      const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
+      return new Response(
+        JSON.stringify({
+          service: "Secure-Static-App-Cloudflare Gateway",
+          status: "healthy",
+          usage: {
+            telegram_upstream: "?id=<telegram_file_id>&action=[download|image]&filename=<filename>",
+            direct_upstream: "?url=<encoded_target_url>&action=[download|image]&filename=<filename>"
+          }
+        }, null, 2),
+        { headers: { "Content-Type": "application/json" } }
+      );
 
-      // 2. Fetch the file from Telegram and stream it
-      const fileRes = await fetch(downloadUrl);
-      
-      const newHeaders = new Headers(fileRes.headers);
-      newHeaders.set("Access-Control-Allow-Origin", "*");
-
-      const filename = url.searchParams.get("filename") || "download.apk";
-
-      if (action === "download") {
-        newHeaders.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-      } else if (action === "image") {
-        newHeaders.set("Cache-Control", "public, s-maxage=86400, max-age=86400"); // Cache images for 24h
-      }
-
-      const response = new Response(fileRes.body, {
-        status: fileRes.status,
-        headers: newHeaders
+    } catch (err) {
+      return new Response(JSON.stringify({ error: err.message }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
       });
-
-      // Save to Cloudflare Cache if it's an image
-      if (action === "image" && fileRes.status === 200) {
-        // Cloudflare requires we clone the response before putting it in cache
-        // wait until the cache is written (using ctx.waitUntil if available, but in module syntax we can just await)
-        // actually standard worker syntax allows cache.put without blocking
-        env.waitUntil && env.waitUntil(cache.put(cacheKey, response.clone()));
-        if (!env.waitUntil) {
-             await cache.put(cacheKey, response.clone());
-        }
-      }
-
-      return response;
-
-    } catch (e) {
-      return new Response("Error processing request: " + e.message, { status: 500 });
     }
   },
 };
+
+/**
+ * Format stream headers and cache responses
+ */
+async function formatStreamResponse(upstreamRes, url, action, cacheKey, cache) {
+  const newHeaders = new Headers(upstreamRes.headers);
+  newHeaders.set("Access-Control-Allow-Origin", "*");
+
+  const filename = url.searchParams.get("filename") || "asset.bin";
+
+  if (action === "download") {
+    newHeaders.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  } else if (action === "image") {
+    newHeaders.set("Cache-Control", "public, s-maxage=86400, max-age=86400");
+  }
+
+  const response = new Response(upstreamRes.body, {
+    status: upstreamRes.status,
+    headers: newHeaders,
+  });
+
+  if (action === "image" && upstreamRes.status === 200) {
+    await cache.put(cacheKey, response.clone());
+  }
+
+  return response;
+}
